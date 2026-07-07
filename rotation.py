@@ -12,6 +12,11 @@ H = INV_SQRT2 * np.array([[1, 1], [1, -1]], dtype=DTYPE)
 LAMBDA_PI = np.arccos((1.0 + INV_SQRT2) / 2.0)
 TWO_PI = 2.0 * np.pi
 
+# Pauli matrices used for trace calculations throughout the file
+X = np.array([[0, 1], [1, 0]], dtype=DTYPE)
+Y = np.array([[0, -1j], [1j, 0]], dtype=DTYPE)
+Z = np.array([[1, 0], [0, -1]], dtype=DTYPE)
+
 
 class Bloch:
     """Axis-angle (Bloch) form of a 2x2 unitary G:
@@ -29,14 +34,55 @@ class Bloch:
 
 def to_bloch(g: np.ndarray) -> Bloch:
     """Recover the Bloch form (alpha, n, theta) of a 2x2 unitary `g`."""
-    raise NotImplementedError("to_bloch is not implemented yet")
+    b = Bloch()
+    
+    # Get the global phase from the determinant (divide by 2)
+    det = g[0, 0] * g[1, 1] - g[0, 1] * g[1, 0]
+    b.alpha = np.angle(det) / 2.0
+
+    # Remove the global phase to isolate the pure SU(2) rotation
+    u = g * np.exp(-1j * b.alpha)
+
+    # Extract the cosine component using the trace
+    cos_half = np.real(np.trace(u)) / 2.0
+    
+    # Extract the scaled axis components using the Pauli matrices
+    nx_sin = np.real(1j * np.trace(X @ u)) / 2.0
+    ny_sin = np.real(1j * np.trace(Y @ u)) / 2.0
+    nz_sin = np.real(1j * np.trace(Z @ u)) / 2.0
+    
+    # Find the sine component by taking the magnitude of the scaled vector
+    sin_half = np.linalg.norm([nx_sin, ny_sin, nz_sin])
+    
+    # Safely calculate the full angle using arctan2
+    b.theta = 2.0 * np.arctan2(sin_half, cos_half)
+
+    # Extract the normalized axis (handling the zero-rotation edge case)
+    if sin_half < 1e-10:
+        b.n = np.array([0.0, 0.0, 1.0])
+    else:
+        b.n = np.array([nx_sin, ny_sin, nz_sin]) / sin_half
+            
+    return b
 
 
 # n1, n2 are two orthogonal Bloch-sphere axes (n1 . n2 == 0)
-# TODO: fill in the two orthogonal rotation axes (each a length-3
-# unit vector [x, y, z])
-n1 = np.array([np.nan, np.nan, np.nan])
-n2 = np.array([np.nan, np.nan, np.nan])
+
+# We define standard unit vectors for x, y, and z directions
+x_hat = np.array([1.0, 0.0, 0.0])
+y_hat = np.array([0.0, 1.0, 0.0])
+z_hat = np.array([0.0, 0.0, 1.0])
+
+# Calculate the cotangent of pi/8
+cot_pi8 = 1.0 / np.tan(np.pi / 8.0)
+
+# Apply the mathematical simplifications for the raw axes
+n1_unnorm = cot_pi8 * (z_hat - x_hat) + y_hat
+n2_unnorm = np.sqrt(2.0) * cot_pi8 * y_hat - (z_hat - x_hat) / np.sqrt(2.0)
+
+# Divide them by their length (norm) so they have a length of exactly 1
+n1 = n1_unnorm / np.linalg.norm(n1_unnorm)
+n2 = n2_unnorm / np.linalg.norm(n2_unnorm)
 
 # frame derived from the axes (given)
 # take the dot product of the Bloch axis with these
@@ -53,8 +99,31 @@ def n1n2n1_angles(b: Bloch) -> tuple[float, float, float, float]:
     where Ra(angle) is a rotation by `angle` about axis a, and {a1, a2, a3} is
     the orthonormal frame defined above. Returns (alpha, beta, gamma, global_phase).
     """
-    # TODO: implement using the steps above.
-    raise NotImplementedError("n1n2n1_angles is not implemented yet")
+    # Calculate the cosine and sine of the half-angle
+    c = np.cos(b.theta / 2.0)
+    s = np.sin(b.theta / 2.0)
+    
+    # Scale the rotation axis 'n' by the sine of the half angle
+    v = s * b.n
+    
+    # Project the vector onto our orthogonal axes
+    v1 = np.dot(v, a1)
+    v2 = np.dot(v, a2)
+    v3 = np.dot(v, a3)
+    
+    # Solve the system of trigonometric equations.
+    sum_angles = np.arctan2(v1, c)   
+    diff_angles = np.arctan2(v3, v2) 
+    
+    # Extract the FULL alpha and gamma angles algebraically
+    alpha = sum_angles - diff_angles
+    gamma = sum_angles + diff_angles
+    
+    # Extract the half-angle for beta, then multiply by 2 for the FULL angle
+    beta_half = np.arctan2(np.sqrt(v2**2 + v3**2), np.sqrt(c**2 + v1**2))
+    beta = 2.0 * beta_half
+    
+    return alpha, beta, gamma, b.alpha
 
 
 def approx_angle_with_tolerance(angle: float, tolerance: float) -> int:
@@ -69,8 +138,21 @@ def approx_angle_with_tolerance(angle: float, tolerance: float) -> int:
       * the angular distance between two wrapped angles a, b is
         min(|a - b|, TWO_PI - |a - b|) (so 0.01 and 2*pi - 0.01 count as close).
     """
-    # TODO: implement using the hint above.
-    raise NotImplementedError("approx_angle_with_tolerance is not implemented yet")
+    target = angle % TWO_PI
+    k = 1
+    
+    while True:
+        # Calculate the current multiple's angle and wrap it within [0, 2*pi)
+        current_angle = (k * LAMBDA_PI) % TWO_PI
+        difference = abs(current_angle - target)
+        
+        # Calculate the true angular distance accounting for the 2*pi wrap-around
+        distance = min(difference, TWO_PI - difference)
+        
+        if distance <= tolerance:
+            return k
+            
+        k += 1
 
 
 def decompose_2x2(u: np.ndarray, tolerance: float) -> tuple[int, int, int]:
@@ -99,8 +181,14 @@ def decompose_2x2(u: np.ndarray, tolerance: float) -> tuple[int, int, int]:
 
       3. Return (k, l, m).
     """
-    # TODO: implement using the steps above.
-    raise NotImplementedError("decompose_2x2 is not implemented yet")
+    b = to_bloch(u)
+    alpha, beta, gamma, _global_phase = n1n2n1_angles(b)
+    
+    k = approx_angle_with_tolerance(alpha, tolerance)
+    l = approx_angle_with_tolerance(beta, tolerance)
+    m = approx_angle_with_tolerance(gamma, tolerance)
+    
+    return k, l, m
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +207,9 @@ def from_axis_angle(b: Bloch) -> np.ndarray:
 
     where (b.n . sigma) = n_x X + n_y Y + n_z Z. Assumes b.n is a unit vector.
     """
-    # TODO: implement using the formula above.
-    raise NotImplementedError("from_axis_angle is not implemented yet")
+    I = np.eye(2, dtype=DTYPE)
+    n_dot_sigma = b.n[0] * X + b.n[1] * Y + b.n[2] * Z
+    return np.exp(1j * b.alpha) * (np.cos(b.theta / 2.0) * I - 1j * np.sin(b.theta / 2.0) * n_dot_sigma)
 
 
 def Rz(theta: float) -> np.ndarray:
@@ -128,8 +217,11 @@ def Rz(theta: float) -> np.ndarray:
 
     Rz(theta) = diag(e^{-i theta/2}, e^{i theta/2}).
     """
-    # TODO: implement (hint: from_axis_angle about axis [0, 0, 1]).
-    raise NotImplementedError("Rz is not implemented yet")
+    b = Bloch()
+    b.alpha = 0.0
+    b.n = np.array([0.0, 0.0, 1.0])
+    b.theta = theta
+    return from_axis_angle(b)
 
 
 def Ry(theta: float) -> np.ndarray:
@@ -137,8 +229,11 @@ def Ry(theta: float) -> np.ndarray:
 
     Ry(theta) = [[cos(theta/2), -sin(theta/2)], [sin(theta/2), cos(theta/2)]].
     """
-    # TODO: implement (hint: from_axis_angle about axis [0, 1, 0]).
-    raise NotImplementedError("Ry is not implemented yet")
+    b = Bloch()
+    b.alpha = 0.0
+    b.n = np.array([0.0, 1.0, 0.0])
+    b.theta = theta
+    return from_axis_angle(b)
 
 
 def euler_angles_zyz(u: np.ndarray) -> tuple[float, float, float, float]:
@@ -152,8 +247,26 @@ def euler_angles_zyz(u: np.ndarray) -> tuple[float, float, float, float]:
     s10 = sin(gamma/2) e^{i(beta-delta)/2}. When gamma = 0 (s10 = 0), beta/delta are
     split arbitrarily (gimbal lock); the identity still holds.
     """
-    # TODO: implement using the relations above.
-    raise NotImplementedError("euler_angles_zyz is not implemented yet")
+    alpha = np.angle(np.linalg.det(u)) / 2.0
+    S = np.exp(-1j * alpha) * u
+    
+    s00 = S[0, 0]
+    s10 = S[1, 0]
+    
+    # Extract gamma handling floating point inaccuracies
+    gamma = 2.0 * np.arcsin(np.clip(np.abs(s10), 0.0, 1.0))
+    
+    # Handle gimbal lock case (gamma = 0)
+    if np.isclose(np.abs(s10), 0.0, atol=1e-10):
+        beta = -2.0 * np.angle(s00)
+        delta = 0.0
+    else:
+        beta_plus_delta = -2.0 * np.angle(s00)
+        beta_minus_delta = 2.0 * np.angle(s10)
+        beta = (beta_plus_delta + beta_minus_delta) / 2.0
+        delta = (beta_plus_delta - beta_minus_delta) / 2.0
+        
+    return alpha, beta, gamma, delta
 
 
 def unitary2_sqrt(u: np.ndarray) -> np.ndarray:
@@ -161,8 +274,10 @@ def unitary2_sqrt(u: np.ndarray) -> np.ndarray:
     Take the Bloch form of u and halve both alpha and theta (same axis); squaring
     back doubles them, reproducing u exactly.
     """
-    # TODO: implement (hint: to_bloch, halve alpha and theta, from_axis_angle).
-    raise NotImplementedError("unitary2_sqrt is not implemented yet")
+    b = to_bloch(u)
+    b.alpha /= 2.0
+    b.theta /= 2.0
+    return from_axis_angle(b)
 
 
 # ---------------------------------------------------------------------------
@@ -182,35 +297,51 @@ def expand_word(word: list[int]) -> str:
     """Flatten an alternating (T-power, H-power, ...) exponent list into a literal
     string of 'H'/'T' gates (left-to-right). Even indices are T, odd indices are H.
     """
-    # TODO: implement.
-    raise NotImplementedError("expand_word is not implemented yet")
+    res = ""
+    for i, power in enumerate(word):
+        char = 'T' if i % 2 == 0 else 'H'
+        res += char * power
+    return res
 
 
 # flat H/T strings for the two building-block words (computed once expand_word works)
-# M1_STR = expand_word(M1_WORD)
-# M2_STR = expand_word(M2_WORD)
+M1_STR = expand_word(M1_WORD)
+M2_STR = expand_word(M2_WORD)
 
 
 def gates_to_unitary(gates: str) -> np.ndarray:
     """The 2x2 unitary of a flat H/T gate string (left-to-right product)."""
-    # TODO: implement (multiply H / T for each char, starting from I).
-    raise NotImplementedError("gates_to_unitary is not implemented yet")
+    res = np.eye(2, dtype=DTYPE)
+    T = np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=DTYPE)
+    
+    for char in gates:
+        if char == 'H':
+            res = res @ H
+        elif char == 'T':
+            res = res @ T
+    return res
 
 
 def invert_gates(gates: str) -> str:
     """Inverse of a flat H/T word: reverse the gate order and invert each gate.
     H^-1 = H; the {H, T} basis has no T-dagger, so T^-1 must be spelled as T^7.
     """
-    # TODO: implement.
-    raise NotImplementedError("invert_gates is not implemented yet")
+    res = ""
+    for char in reversed(gates):
+        if char == 'H':
+            res += 'H'
+        elif char == 'T':
+            res += 'T' * 7  # T^-1 is T^7
+    return res
 
 
 def power_gates(base: str, k: int) -> str:
     """The k-th power of a flat H/T word: base repeated k times. Negative k uses the
     inverse word (invert_gates).
     """
-    # TODO: implement.
-    raise NotImplementedError("power_gates is not implemented yet")
+    if k >= 0:
+        return base * k
+    return invert_gates(base) * abs(k)
 
 
 def approximate_in_ht(u: np.ndarray, error: float) -> str:
@@ -222,5 +353,5 @@ def approximate_in_ht(u: np.ndarray, error: float) -> str:
 
         power_gates(M1_STR, k) + power_gates(M2_STR, l) + power_gates(M1_STR, m).
     """
-    # TODO: implement using decompose_2x2 and power_gates.
-    raise NotImplementedError("approximate_in_ht is not implemented yet")
+    k, l, m = decompose_2x2(u, error)
+    return power_gates(M1_STR, k) + power_gates(M2_STR, l) + power_gates(M1_STR, m)
